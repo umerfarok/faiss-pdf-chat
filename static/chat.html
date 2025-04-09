@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FIAS Document Chat</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        
+        #chat-container {
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 20px;
+            height: 60vh;
+            overflow-y: auto;
+            background-color: #f9f9f9;
+            margin-bottom: 20px;
+        }
+        
+        .message {
+            padding: 10px 15px;
+            margin-bottom: 10px;
+            border-radius: 10px;
+            max-width: 80%;
+        }
+        
+        .user-message {
+            background-color: #e2f0ff;
+            margin-left: auto;
+            text-align: right;
+            border-radius: 18px 18px 0 18px;
+        }
+        
+        .bot-message {
+            background-color: #f0f0f0;
+            border-radius: 18px 18px 18px 0;
+        }
+        
+        #input-container {
+            display: flex;
+            margin-top: 20px;
+        }
+        
+        #question-input {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            margin-right: 10px;
+            font-size: 16px;
+        }
+        
+        #send-button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        #send-button:hover {
+            background-color: #45a049;
+        }
+        
+        .sources {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(0,0,0,.3);
+            border-radius: 50%;
+            border-top-color: #000;
+            animation: spin 1s ease-in-out infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <h1>FIAS Document Chat</h1>
+    <div id="chat-container">
+        <div class="message bot-message">
+            Hello! I'm your FIAS document assistant. Ask me anything about the documents in the database.
+        </div>
+    </div>
+    
+    <div id="input-container">
+        <input type="text" id="question-input" placeholder="Ask a question..." />
+        <button id="send-button">Send</button>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const chatContainer = document.getElementById('chat-container');
+            const questionInput = document.getElementById('question-input');
+            const sendButton = document.getElementById('send-button');
+            
+            function addMessage(text, isUser = false, sources = []) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
+                
+                // Convert line breaks to <br> tags
+                const formattedText = text.replace(/\n/g, '<br>');
+                messageDiv.innerHTML = formattedText;
+                
+                if (sources && sources.length > 0) {
+                    const sourcesDiv = document.createElement('div');
+                    sourcesDiv.className = 'sources';
+                    sourcesDiv.textContent = 'Sources: ' + sources.join(', ');
+                    messageDiv.appendChild(sourcesDiv);
+                }
+                
+                chatContainer.appendChild(messageDiv);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+            
+            function addLoadingIndicator() {
+                const loadingDiv = document.createElement('div');
+                loadingDiv.className = 'message bot-message';
+                loadingDiv.id = 'loading-message';
+                
+                const loadingIndicator = document.createElement('div');
+                loadingIndicator.className = 'loading';
+                loadingDiv.appendChild(loadingIndicator);
+                loadingDiv.appendChild(document.createTextNode(' Thinking...'));
+                
+                chatContainer.appendChild(loadingDiv);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+            
+            function removeLoadingIndicator() {
+                const loadingMessage = document.getElementById('loading-message');
+                if (loadingMessage) {
+                    loadingMessage.remove();
+                }
+            }
+            
+            async function sendQuestion() {
+                const question = questionInput.value.trim();
+                if (!question) return;
+                
+                addMessage(question, true);
+                questionInput.value = '';
+                
+                addLoadingIndicator();
+                
+                try {
+                    const response = await fetch('/chat', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ question })
+                    });
+                    
+                    const data = await response.json();
+                    removeLoadingIndicator();
+                    
+                    addMessage(data.answer, false, data.sources);
+                } catch (error) {
+                    removeLoadingIndicator();
+                    addMessage('Sorry, there was an error processing your request. Please try again.', false);
+                    console.error('Error:', error);
+                }
+            }
+            
+            sendButton.addEventListener('click', sendQuestion);
+            
+            questionInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    sendQuestion();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
