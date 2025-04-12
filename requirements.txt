@@ -9,3 +9,7 @@ tenacity==8.2.3
 tiktoken==0.5.1
 tqdm==4.66.1
 pydantic==2.4.2
+transformers>=4.0.0
+torch>=1.8.0
+# CORS support is included in FastAPI, but we'll make it explicit
+starlette>=0.27.0

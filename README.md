@@ -12,10 +12,6 @@ This application implements a Retrieval-Augmented Generation (RAG) system using 
 - **GPU Acceleration**: Optional GPU support for faster vector operations
 - **Advanced Indexing**: Multiple FAISS index types for optimized performance
 
-https://github.com/user-attachments/assets/78019ca1-4385-4d13-b2e4-7ff927b429c0
-
-
-
 ## Setup
 
 1. Clone this repository

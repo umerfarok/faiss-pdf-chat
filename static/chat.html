@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FIAS Document Chat</title>
+    <title>FIAS Chat & Classification</title>
     <style>
         body {
             font-family: Arial, sans-serif;
             max-width: 800px;
             margin: 0 auto;
-            padding: 20px;
+            padding: 20px; 
             line-height: 1.6;
         }
         
@@ -94,18 +94,28 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+        
+        .classification-result {
+            font-weight: bold;
+            text-transform: capitalize;
+        }
+        
+        .confidence-score {
+            font-size: 0.8em;
+            color: #555;
+        }
     </style>
 </head>
 <body>
-    <h1>FIAS Document Chat</h1>
+    <h1>FIAS Chat & Classification</h1>
     <div id="chat-container">
         <div class="message bot-message">
-            Hello! I'm your FIAS document assistant. Ask me anything about the documents in the database.
+            Hello! I'm your FIAS assistant. Ask me anything about the documents in the database or ask me to classify suspicious messages for phishing.
         </div>
     </div>
     
     <div id="input-container">
-        <input type="text" id="question-input" placeholder="Ask a question..." />
+        <input type="text" id="question-input" placeholder="Ask a question or provide text to classify..." />
         <button id="send-button">Send</button>
     </div>
 
@@ -115,19 +125,40 @@
             const questionInput = document.getElementById('question-input');
             const sendButton = document.getElementById('send-button');
             
-            function addMessage(text, isUser = false, sources = []) {
+            // Get the current URL base to handle different deployment scenarios
+            const getBaseUrl = () => {
+                // When served through FastAPI, use the current origin
+                // This ensures the fetch request works regardless of deployment
+                return "http://127.0.0.1:8000"
+            };
+            
+            function addMessage(text, isUser = false, sources = [], isClassification = false, confidence = null) {
                 const messageDiv = document.createElement('div');
                 messageDiv.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
                 
-                // Convert line breaks to <br> tags
-                const formattedText = text.replace(/\n/g, '<br>');
-                messageDiv.innerHTML = formattedText;
-                
-                if (sources && sources.length > 0) {
-                    const sourcesDiv = document.createElement('div');
-                    sourcesDiv.className = 'sources';
-                    sourcesDiv.textContent = 'Sources: ' + sources.join(', ');
-                    messageDiv.appendChild(sourcesDiv);
+                if (isClassification) {
+                    // Format classification result
+                    const resultSpan = document.createElement('span');
+                    resultSpan.className = 'classification-result';
+                    resultSpan.textContent = `Result: ${text}`;
+                    
+                    const confidenceSpan = document.createElement('span');
+                    confidenceSpan.className = 'confidence-score';
+                    confidenceSpan.textContent = ` (Confidence: ${(confidence * 100).toFixed(1)}%)`;
+                    
+                    messageDiv.appendChild(resultSpan);
+                    messageDiv.appendChild(confidenceSpan);
+                } else {
+                    // Format regular message
+                    const formattedText = text.replace(/\n/g, '<br>');
+                    messageDiv.innerHTML = formattedText;
+                    
+                    if (sources && sources.length > 0) {
+                        const sourcesDiv = document.createElement('div');
+                        sourcesDiv.className = 'sources';
+                        sourcesDiv.textContent = 'Sources: ' + sources.join(', ');
+                        messageDiv.appendChild(sourcesDiv);
+                    }
                 }
                 
                 chatContainer.appendChild(messageDiv);
@@ -165,7 +196,12 @@
                 addLoadingIndicator();
                 
                 try {
-                    const response = await fetch('/chat', {
+                    // Use the base URL to construct the full endpoint URL
+                    const apiUrl = `${getBaseUrl()}/chat`;
+                    
+                    console.log(`Sending request to: ${apiUrl}`);
+                    
+                    const response = await fetch(apiUrl, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -173,13 +209,27 @@
                         body: JSON.stringify({ question })
                     });
                     
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+                        throw new Error(`Error: ${errorData.detail || response.statusText}`);
+                    }
+                    
                     const data = await response.json();
                     removeLoadingIndicator();
                     
-                    addMessage(data.answer, false, data.sources);
+                    // Handle different response types based on intent
+                    if (data.intent === 'classification') {
+                        addMessage(data.result, false, [], true, data.confidence);
+                    } else if (data.intent === 'analytics') {
+                        addMessage(data.answer, false, data.sources);
+                    } else {
+                        addMessage('Received an unexpected response format.', false);
+                        console.warn('Unexpected response format:', data);
+                    }
+                    
                 } catch (error) {
                     removeLoadingIndicator();
-                    addMessage('Sorry, there was an error processing your request. Please try again.', false);
+                    addMessage(`Sorry, there was an error: ${error.message}`, false);
                     console.error('Error:', error);
                 }
             }

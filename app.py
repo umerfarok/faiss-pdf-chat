@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from pathlib import Path
 from datetime import datetime
 import shutil
@@ -14,12 +14,18 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import PyPDF2
 from tqdm import tqdm
 from tenacity import retry, wait_exponential, stop_after_attempt
 import tiktoken
 from contextlib import asynccontextmanager
+# New imports for intent classification and HuggingFace model
+from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
+import torch
+
+# Import CORS middleware
+from fastapi.middleware.cors import CORSMiddleware
 
 # Setup logging
 logging.basicConfig(
@@ -51,6 +57,10 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o")
 TOP_K_RESULTS = int(os.getenv("TOP_K_RESULTS", "6"))
 PROCESSED_FILES_PATH = os.path.join(VECTOR_STORE_PATH, "processed_files.json")
 
+# Phishing Classifier Configuration
+PHISHING_MODEL_NAME = os.getenv("PHISHING_MODEL_NAME", "Abdelllm2025/phishing_clf_fine_tuned_bert")
+ENABLE_PHISHING_CLASSIFIER = os.getenv("ENABLE_PHISHING_CLASSIFIER", "true").lower() == "true"
+
 # Advanced configuration
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1000"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
@@ -68,12 +78,56 @@ HNSW_EF_SEARCH = int(os.getenv("HNSW_EF_SEARCH", "128"))
 PARALLEL_PROCESSING = int(os.getenv("PARALLEL_PROCESSING", "4"))
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 
+# Global variable for phishing classifier pipeline
+phishing_classifier = None
+
 # Lifespan context manager for startup/shutdown events
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for FastAPI app"""
     # Startup code
     logger.info("Starting RAG Chat API")
+    global vector_store, phishing_classifier
+    
+    # Initialize Vector Store
+    vector_store = VectorStore()
+    
+    # Load Phishing Classifier Model if enabled
+    if ENABLE_PHISHING_CLASSIFIER:
+        try:
+            logger.info(f"Loading phishing classification model: {PHISHING_MODEL_NAME}...")
+            # Determine device: use GPU if available and configured, else CPU
+            device = -1  # Default to CPU
+            if USE_GPU and torch.cuda.is_available():
+                device = GPU_DEVICE_ID
+                logger.info(f"Using GPU device {device} for phishing model.")
+            else:
+                logger.info("Using CPU for phishing model.")
+
+            # Load tokenizer and model
+            tokenizer = AutoTokenizer.from_pretrained(PHISHING_MODEL_NAME)
+            model = AutoModelForSequenceClassification.from_pretrained(PHISHING_MODEL_NAME)
+            
+            # Create pipeline
+            phishing_classifier = pipeline(
+                "text-classification",
+                model=model,
+                tokenizer=tokenizer,
+                device=device
+            )
+            logger.info("Phishing classification model loaded successfully.")
+            # Run a dummy inference to warm up the model
+            try:
+                _ = phishing_classifier("test")
+                logger.info("Phishing model warmup successful.")
+            except Exception as warmup_e:
+                logger.warning(f"Phishing model warmup failed: {warmup_e}")
+
+        except Exception as e:
+            logger.error(f"Failed to load phishing model '{PHISHING_MODEL_NAME}': {e}")
+            phishing_classifier = None
+    else:
+        logger.info("Phishing classifier is disabled.")
     
     # Process PDFs if syncing is enabled
     if SYNC_FOLDER_DATA:
@@ -84,14 +138,33 @@ async def lifespan(app: FastAPI):
         
     yield
     
-    # Shutdown code here (if needed)
+    # Shutdown code
     logger.info("Shutting down RAG Chat API")
+    # Clean up GPU memory if used by the classifier
+    if phishing_classifier and hasattr(phishing_classifier.model, 'to'):
+        try:
+            phishing_classifier.model.to('cpu')
+            logger.info("Moved phishing model back to CPU.")
+        except Exception as e:
+            logger.error(f"Error moving phishing model to CPU: {e}")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        logger.info("Cleared CUDA cache.")
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
     title="RAG Chat API", 
-    description="API for chatting with your PDF documents",
+    description="API for chatting with your PDF documents and classifying phishing messages",
     lifespan=lifespan
+)
+
+# Add CORS middleware to allow all origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
 # Create static directory if it doesn't exist
@@ -104,14 +177,25 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 class ChatRequest(BaseModel):
     question: str
 
-class ChatResponse(BaseModel):
+# Define specific response models for different intents
+class ClassificationResponse(BaseModel):
+    intent: str = "classification"
+    result: str
+    confidence: float
+    processing_time: float
+
+class AnalyticsResponse(BaseModel):
+    intent: str = "analytics"
     answer: str
     sources: List[str]
     processing_time: float
 
+# Union type for response
+ChatResponseUnion = Union[ClassificationResponse, AnalyticsResponse]
 
 # Helper class to manage vector store
 class VectorStore:
+    # ...existing VectorStore class code...
     def __init__(self, vector_store_path: str = VECTOR_STORE_PATH):
         self.vector_store_path = Path(vector_store_path)
         self.vector_store_path.mkdir(exist_ok=True, parents=True)
@@ -359,6 +443,7 @@ class VectorStore:
             raise
 
 
+# ... existing helper functions (get_processed_files, save_processed_files, num_tokens_from_string, chunk_text, read_pdf, process_pdfs) ...
 def get_processed_files() -> dict:
     """Load the list of processed files from disk"""
     if os.path.exists(PROCESSED_FILES_PATH):
@@ -505,28 +590,146 @@ def process_pdfs(vector_store: VectorStore, background: bool = False):
     logger.info("PDF processing completed")
 
 
+# --- Intent Classification and Phishing Detection ---
+def classify_intent(query: str) -> str:
+    """Classify user query intent using rule-based approach."""
+    query_lower = query.strip().lower()
+    # Keywords suggesting classification task
+    classification_keywords = [
+        "is this phishing", "is this spam", "classify this",
+        "check this email", "scan this message", "analyze this text for phishing"
+    ]
+    
+    # Check if the query starts with classification keywords
+    if any(query_lower.startswith(keyword) for keyword in classification_keywords):
+        return "classification"
+
+    # Check for queries that contain classification keywords AND seem to include message content
+    if any(keyword in query_lower for keyword in classification_keywords):
+        # Basic check for message content (e.g., multiple lines, common email headers)
+        if "\n" in query or "subject:" in query_lower or "from:" in query_lower or "http" in query_lower:
+            # Check if it's just a question about classification vs. a request to classify
+            if len(query.split()) > 15 or "\n" in query:  # Heuristic: longer queries or multiline likely contain text to classify
+                return "classification"
+
+    # Default to analytics/fact query
+    return "analytics"
+
+
+def extract_text_for_classification(query: str) -> str:
+    """Extract the core text to be classified from the user query."""
+    query_strip = query.strip()
+    query_lower = query_strip.lower()
+    
+    # Check for prefixes like "Is this phishing:" followed by the text
+    classification_prefixes = [
+        "is this phishing:", "is this spam:", "classify this:",
+        "check this email:", "scan this message:", "analyze this text for phishing:"
+    ]
+    
+    # Check for prefix patterns
+    for prefix in classification_prefixes:
+        if query_lower.startswith(prefix):
+            return query_strip[len(prefix):].strip()
+            
+    # If no prefix, look for content after a newline
+    newline_index = query_strip.find('\n')
+    if newline_index != -1:
+        first_line = query_strip[:newline_index].strip().lower()
+        # Check if the first line seems like an instruction
+        is_question = first_line.endswith('?')
+        has_keyword = any(kw in first_line for kw in ["is this", "classify", "check", "scan", "analyze"])
+        if is_question or has_keyword:
+            potential_text = query_strip[newline_index:].strip()
+            if len(potential_text) > 10:  # Ensure there's substantial text after newline
+                return potential_text
+                
+    # Fallback: if we can't clearly extract the text to classify, use the whole query
+    logger.warning("Could not reliably extract text to classify, using full query.")
+    return query_strip
+
+
+async def run_phishing_classifier(text: str) -> Dict[str, Any]:
+    """Run the phishing classifier on the provided text."""
+    global phishing_classifier
+    
+    if phishing_classifier is None:
+        logger.error("Phishing classifier requested but not available.")
+        raise HTTPException(status_code=503, detail="Phishing classification model is not available")
+        
+    if not text.strip():
+        logger.warning("Received empty text for phishing classification.")
+        return {"result": "not phishing", "confidence": 1.0}
+        
+    try:
+        start_time = time.time()
+        logger.info(f"Running phishing classification on text (length: {len(text)})")
+        
+        # The model might return results in different formats, handle both possibilities
+        results = phishing_classifier(text, truncation=True, max_length=512)
+        logger.info(f"Classification result: {results}")
+        
+        if isinstance(results, list) and results:
+            result = results[0]  # Get the first result
+            raw_label = result.get('label', '').upper()
+            confidence = result.get('score', 0.0)
+            
+            # Map the label to a consistent format
+            if raw_label == 'LABEL_1' or raw_label == 'PHISHING':
+                label = "phishing"
+            elif raw_label == 'LABEL_0' or raw_label == 'NOT PHISHING':
+                label = "not phishing"
+            else:
+                logger.warning(f"Unknown label: {raw_label}, defaulting to 'not phishing'")
+                label = "not phishing"
+                
+            logger.info(f"Classified as: {label} with confidence {confidence:.4f}")
+            return {"result": label, "confidence": confidence}
+        else:
+            logger.error(f"Unexpected result format from classifier: {results}")
+            raise HTTPException(status_code=500, detail="Unexpected classifier result format")
+            
+    except Exception as e:
+        logger.error(f"Error during phishing classification: {e}")
+        raise HTTPException(status_code=500, detail=f"Error during phishing classification: {str(e)}")
+
+
 @retry(wait=wait_exponential(min=1, max=60), stop=stop_after_attempt(3))
 async def generate_answer(question: str, context: List[Dict]) -> str:
     """Generate an answer using OpenAI API with the given context"""
     try:
         # Extract text from context results
-        context_texts = [f"Source: {result['metadata']['source']}\n\n{result['metadata'].get('page_content', '')}" 
-                        for result in context]
-        context_str = "\n\n".join(context_texts)
+        context_texts = []
+        seen_sources = set()
         
-        system_message = f"""You are a helpful assistant that answers questions based on provided context.
-        Use ONLY the context provided to answer. If the answer is not in the context or you're not sure, say 
-        "I don't have enough information to answer this question based on the available documents."
-        Always cite your sources by mentioning the document name.
-        """
+        for result in context:
+            metadata = result.get('metadata', {})
+            source = metadata.get('source', 'Unknown Source')
+            content = metadata.get('page_content', '')
+            
+            # Include source info only once per document
+            source_info = f"Source: {source}" if source not in seen_sources else ""
+            if source_info:
+                seen_sources.add(source)
+                
+            context_texts.append(f"{source_info}\n\n{content}")
+            
+        context_str = "\n\n---\n\n".join(context_texts)
         
-        user_message = f"""Context information is below.
-        ---------------------
+        system_message = f"""You are a helpful assistant specialized in analyzing information from provided documents.
+        Answer the user's question based *only* on the context provided below.
+        Do not use any prior knowledge or information outside the context.
+        If the answer cannot be found in the context, state that clearly.
+        When information is found, cite the source document(s) mentioned in the context.
+        Be concise and directly answer the question.
+
+        Context:
         {context_str}
-        ---------------------
-        Given the context information and not prior knowledge, answer the question: {question}
         """
+
+        user_message = f"Based *only* on the provided context, answer the following question: {question}"
         
+        logger.info(f"Generating answer for question: '{question}' using model {CHAT_MODEL}")
         completion = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=[
@@ -537,50 +740,104 @@ async def generate_answer(question: str, context: List[Dict]) -> str:
             max_tokens=MAX_TOKENS
         )
         
-        return completion.choices[0].message.content
+        answer = completion.choices[0].message.content
+        logger.info("Answer generated successfully")
+        return answer
     except Exception as e:
         logger.error(f"Error generating answer: {e}")
         raise
 
 
-# Initialize the vector store at startup
-vector_store = VectorStore()
+# Initialize the vector store globally (handled in lifespan context manager)
+vector_store: Optional[VectorStore] = None
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
-    """Endpoint to chat with the RAG system"""
+# Modified Chat Endpoint with intent classification
+@app.post("/chat", response_model=ChatResponseUnion)
+async def chat(request: ChatRequest) -> Union[ClassificationResponse, AnalyticsResponse]:
+    """
+    Enhanced chat endpoint that:
+    1. Classifies the query intent (classification or analytics)
+    2. Routes to either phishing classifier or RAG pipeline based on intent
+    3. Returns appropriate response format
+    """
     start_time = time.time()
     question = request.question
     
     if not question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     
-    try:
-        # Search for relevant context
-        search_results = vector_store.search(question)
-        
-        if not search_results:
-            return ChatResponse(
-                answer="I don't have any relevant information to answer this question.",
-                sources=[],
-                processing_time=time.time() - start_time
-            )
-        
-        # Generate answer based on context
-        answer = await generate_answer(question, search_results)
-        
-        # Extract unique source filenames
-        sources = list({result["metadata"]["source"] for result in search_results})
-        
-        processing_time = time.time() - start_time
-        
-        return ChatResponse(
-            answer=answer,
-            sources=sources,
-            processing_time=processing_time
-        )
+    # Ensure vector store is initialized
+    if vector_store is None:
+        logger.error("Vector store is not initialized")
+        raise HTTPException(status_code=503, detail="Vector store not initialized")
     
+    try:
+        # 1. Classify intent
+        intent = classify_intent(question)
+        logger.info(f"Classified intent as: {intent}")
+        
+        # 2. Route based on intent
+        if intent == "classification":
+            if not ENABLE_PHISHING_CLASSIFIER or phishing_classifier is None:
+                logger.warning("Classification intent detected but classifier is disabled")
+                raise HTTPException(status_code=501, detail="Phishing classification is disabled")
+                
+            # Extract text to classify
+            text_to_classify = extract_text_for_classification(question)
+            logger.info(f"Extracted text for classification (length: {len(text_to_classify)})")
+            
+            # Run phishing classifier
+            classification_result = await run_phishing_classifier(text_to_classify)
+            processing_time = time.time() - start_time
+            
+            # Return classification response
+            return ClassificationResponse(
+                intent=intent,
+                result=classification_result["result"],
+                confidence=classification_result["confidence"],
+                processing_time=processing_time
+            )
+            
+        elif intent == "analytics":
+            # Use existing RAG pipeline
+            search_results = vector_store.search(question, top_k=TOP_K_RESULTS)
+            
+            if not search_results:
+                processing_time = time.time() - start_time
+                return AnalyticsResponse(
+                    intent=intent,
+                    answer="I don't have relevant information to answer this question in the available documents.",
+                    sources=[],
+                    processing_time=processing_time
+                )
+            
+            # Generate answer based on retrieved context
+            answer = await generate_answer(question, search_results)
+            
+            # Extract unique source filenames
+            sources = sorted(list({
+                result.get("metadata", {}).get("source", "Unknown Source") 
+                for result in search_results
+            }))
+            
+            processing_time = time.time() - start_time
+            
+            # Return analytics response
+            return AnalyticsResponse(
+                intent=intent,
+                answer=answer,
+                sources=sources,
+                processing_time=processing_time
+            )
+        else:
+            # Should not happen with current implementation
+            logger.error(f"Unknown intent: {intent}")
+            raise HTTPException(status_code=500, detail="Unknown intent classification")
+            
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         logger.error(f"Error processing chat request: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
@@ -595,11 +852,28 @@ async def trigger_pdf_processing(background_tasks: BackgroundTasks):
 
 @app.get("/health")
 async def health_check():
-    """Endpoint to check if the API is running"""
+    """Enhanced health check endpoint with phishing classifier status"""
+    vector_store_size = 0
+    vector_store_status = "unavailable"
+    
+    if vector_store and vector_store.index:
+        vector_store_size = vector_store.index.ntotal
+        vector_store_status = "ok"
+    
+    phishing_model_status = "disabled"
+    if ENABLE_PHISHING_CLASSIFIER:
+        phishing_model_status = "loaded" if phishing_classifier else "error"
+    
     return {
         "status": "ok",
-        "vector_store_size": vector_store.index.ntotal if vector_store.index else 0,
-        "pdf_sync_enabled": SYNC_FOLDER_DATA
+        "timestamp": datetime.now().isoformat(),
+        "vector_store_status": vector_store_status,
+        "vector_store_size": vector_store_size,
+        "pdf_sync_enabled": SYNC_FOLDER_DATA,
+        "phishing_classifier_status": phishing_model_status,
+        "phishing_model_name": PHISHING_MODEL_NAME if ENABLE_PHISHING_CLASSIFIER else None,
+        "embedding_model": EMBEDDING_MODEL,
+        "chat_model": CHAT_MODEL
     }
 
 
@@ -611,8 +885,6 @@ async def read_root():
 
 if __name__ == "__main__":
     import uvicorn
-    # Replace 0.0.0.0 with your actual IP address if you want to share it on your network
-    # Or use 127.0.0.1/localhost if you only want local access
     host = "127.0.0.1"  # For local access only
-    # host = "0.0.0.0"  # For access from other devices (commented out)
-    uvicorn.run(app, host=host, port=8000)
+    port = 8000
+    uvicorn.run(app, host=host, port=port)
