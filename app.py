@@ -591,8 +591,62 @@ def process_pdfs(vector_store: VectorStore, background: bool = False):
 
 
 # --- Intent Classification and Phishing Detection ---
-def classify_intent(query: str) -> str:
-    """Classify user query intent using rule-based approach."""
+async def classify_intent(query: str) -> str:
+    """
+    Classify user query intent using OpenAI to determine if it's a classification request
+    or an analytics/fact-based query.
+    """
+    try:
+        logger.info(f"Using OpenAI to classify intent for query: '{query[:50]}...' (if longer)")
+        
+        system_message = """You are an intent classifier for a RAG system. 
+        Your task is to determine if the user's query is asking for:
+        1. "classification" - The user wants to classify text as phishing/spam or not
+        2. "analytics" - The user is asking a general question to be answered using document knowledge
+
+        For "classification" intent, look for:
+        - Explicit requests to analyze, classify, or check if something is phishing/spam
+        - Text that appears to be an email, message or suspicious content the user wants analyzed
+        - Questions like "Is this phishing?" followed by message content
+
+        For "analytics" intent, look for:
+        - General questions about topics, concepts, or information
+        - Requests for explanations, summaries, or information retrieval
+        - Any query that doesn't explicitly ask for classification
+
+        Respond with ONLY "classification" or "analytics" without explanation.
+        """
+        
+        user_message = f"Classify this query: {query}"
+        
+        completion = client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Using a smaller model for efficiency with this task
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            temperature=0.1,  # Low temperature for more predictable results
+            max_tokens=20     # We only need a single word response
+        )
+        
+        intent = completion.choices[0].message.content.strip().lower()
+        
+        # Ensure we only get one of our two intended categories
+        if "classification" in intent:
+            logger.info("OpenAI classified intent as: classification")
+            return "classification"
+        else:
+            # Default to analytics for any other response
+            logger.info("OpenAI classified intent as: analytics")
+            return "analytics"
+            
+    except Exception as e:
+        # Fallback to rule-based classification if OpenAI fails
+        logger.warning(f"Error using OpenAI for intent classification: {e}. Falling back to rule-based approach.")
+        return rule_based_intent_classification(query)
+
+def rule_based_intent_classification(query: str) -> str:
+    """Fallback rule-based intent classification approach."""
     query_lower = query.strip().lower()
     # Keywords suggesting classification task
     classification_keywords = [
@@ -615,7 +669,6 @@ def classify_intent(query: str) -> str:
     # Default to analytics/fact query
     return "analytics"
 
-
 def extract_text_for_classification(query: str) -> str:
     """Extract the core text to be classified from the user query."""
     query_strip = query.strip()
@@ -634,7 +687,7 @@ def extract_text_for_classification(query: str) -> str:
             
     # If no prefix, look for content after a newline
     newline_index = query_strip.find('\n')
-    if newline_index != -1:
+    if (newline_index != -1):
         first_line = query_strip[:newline_index].strip().lower()
         # Check if the first line seems like an instruction
         is_question = first_line.endswith('?')
@@ -773,8 +826,8 @@ async def chat(request: ChatRequest) -> Union[ClassificationResponse, AnalyticsR
         raise HTTPException(status_code=503, detail="Vector store not initialized")
     
     try:
-        # 1. Classify intent
-        intent = classify_intent(question)
+        # 1. Classify intent using OpenAI
+        intent = await classify_intent(question)
         logger.info(f"Classified intent as: {intent}")
         
         # 2. Route based on intent

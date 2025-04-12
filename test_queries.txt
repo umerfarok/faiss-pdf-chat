@@ -1,0 +1,65 @@
+==============================================
+RAG (ANALYTICS) TEST QUERIES
+==============================================
+
+1. "What are the main points discussed in the documents?"
+
+2. "Can you summarize the key findings from the reports?"
+
+3. "What information is available about phishing attacks in the documents?"
+
+4. "How do the documents recommend protecting against cyber threats?"
+
+5. "What statistical data is mentioned in the documents?"
+
+6. "Are there any case studies mentioned in the reports?"
+
+7. "What methodologies are described in the research papers?"
+
+8. "What are the conclusions from the analysis in the documents?"
+
+9. "Who are the main authors or organizations mentioned in the documents?"
+
+10. "What recommendations are provided in the documents?"
+
+==============================================
+PHISHING CLASSIFICATION TEST QUERIES
+==============================================
+
+1. "Is this phishing? Dear Customer, We've noticed unusual activity on your account. Please verify your information by clicking: http://amaz0n-secure.com/verify"
+
+2. "Check if this email is a scam: Subject: URGENT: Your payment failed. Click here to update billing information: http://netfllx-billing.xyz"
+
+3. "Classify this message: Dear Bank Customer, This is to inform you that your online banking access will be terminated. Please update your information immediately: [LINK]"
+
+4. "Is this a legitimate message? Hello, this is John from IT support. We're updating security protocols. Please send me your login credentials so I can verify your account."
+
+5. "Analyze this for phishing: 
+   Subject: Your Account Has Been Limited
+   From: paypal-service@secure-paypal.com
+   
+   Dear Customer,
+   
+   We have temporarily limited your PayPal account. To restore full functionality, verify your information by logging in here: http://paypa1-secure-login.com/verify"
+
+6. "Is this email suspicious?
+   Dear User,
+   Your Microsoft Office 365 subscription is about to expire. To continue using our service without interruption, please update your payment details at: https://microsoft-renew.secureportal.com"
+
+7. "Check if this is phishing: Your Amazon order #38942 for iPhone 13 Pro has shipped. Track your package here: http://amazn-tracking.info/track"
+
+8. "Classify this text: Important notice from Apple: Your Apple ID was used to sign in to iCloud on a new device. If this wasn't you, please verify your identity: http://apple-id-verify.com"
+
+9. "Is this a scam?
+   CONGRATULATIONS! Your email address has won £1,000,000 in the UK National Lottery. To claim your prize, reply with your bank details and a copy of your ID."
+
+10. "Analyze this message:
+    Subject: Action Required - HR Document
+    
+    Hello,
+    
+    Please review and sign the attached document regarding updated company policies.
+    
+    Best regards,
+    HR Department
+    [Attachment: CompanyPolicy_2023.doc]"
