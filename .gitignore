@@ -43,7 +43,7 @@ htmlcov/
 .ipynb_checkpoints
 
 # Model files and local databases
-*.index
+
 *.bin
 *.db
 *.sqlite
