@@ -147,7 +147,7 @@ async def lifespan(app: FastAPI):
             logger.info("Moved phishing model back to CPU.")
         except Exception as e:
             logger.error(f"Error moving phishing model to CPU: {e}")
-    if torch.cuda.is_available():
+    if torch.cuda.is_available(): 
         torch.cuda.empty_cache()
         logger.info("Cleared CUDA cache.")
 
