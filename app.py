@@ -182,6 +182,7 @@ class ClassificationResponse(BaseModel):
     intent: str = "classification"
     result: str
     confidence: float
+    remedies: List[str] = []
     processing_time: float
 
 class AnalyticsResponse(BaseModel):
@@ -800,6 +801,67 @@ async def generate_answer(question: str, context: List[Dict]) -> str:
         logger.error(f"Error generating answer: {e}")
         raise
 
+async def generate_phishing_remedies(text: str) -> List[str]:
+    """Generate specific remedies based on the identified phishing text"""
+    try:
+        # Create a prompt to analyze the phishing message and generate targeted remedies
+        system_message = """You are a cybersecurity expert. Analyze the phishing message 
+        and provide 3-5 specific, actionable precautions the user should take related to this 
+        specific phishing attempt. Be concise and direct. Each recommendation should be a single 
+        sentence focused on a specific action. Don't include general advice unless relevant to this 
+        specific message."""
+        
+        user_message = f"""Analyze this phishing message and provide 3-5 specific, actionable precautions:
+        
+        {text}
+        
+        Format your response as a simple list of recommendations, one per line."""
+        
+        logger.info("Generating phishing remedies")
+        completion = client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Using a smaller model for efficiency
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            temperature=0.7,  # Allow some creativity in recommendations
+            max_tokens=250    # Keep it concise
+        )
+        
+        remedies_text = completion.choices[0].message.content.strip()
+        
+        # Process the response into a list of remedies
+        remedies_list = []
+        for line in remedies_text.split('\n'):
+            line = line.strip()
+            # Remove leading numbers, bullets or dashes
+            line = line.lstrip('0123456789.-*• \t')
+            if line and len(line) > 10:  # Ensure it's a substantial recommendation
+                remedies_list.append(line)
+        
+        # If no valid remedies were found, provide default ones
+        if not remedies_list:
+            remedies_list = [
+                "Never click on suspicious links in emails or messages.",
+                "Do not share personal information or credentials in response to unsolicited messages.",
+                "Contact the supposed sender through official channels to verify the message.",
+                "Report the phishing attempt to your IT department or relevant authorities.",
+                "Be cautious of messages creating urgency or threats to pressure you into action."
+            ]
+        
+        logger.info(f"Generated {len(remedies_list)} phishing remedies")
+        return remedies_list
+        
+    except Exception as e:
+        logger.error(f"Error generating phishing remedies: {e}")
+        # Return default remedies in case of error
+        return [
+            "Never click on suspicious links in emails or messages.",
+            "Do not share personal information or credentials in response to unsolicited messages.",
+            "Contact the supposed sender through official channels to verify the message.",
+            "Report the phishing attempt to your IT department or relevant authorities.",
+            "Be cautious of messages creating urgency or threats to pressure you into action."
+        ]
 
 # Initialize the vector store globally (handled in lifespan context manager)
 vector_store: Optional[VectorStore] = None
@@ -842,13 +904,20 @@ async def chat(request: ChatRequest) -> Union[ClassificationResponse, AnalyticsR
             
             # Run phishing classifier
             classification_result = await run_phishing_classifier(text_to_classify)
+            
+            # Generate remedies if classified as phishing
+            remedies = []
+            if classification_result["result"] == "phishing":
+                remedies = await generate_phishing_remedies(text_to_classify)
+            
             processing_time = time.time() - start_time
             
-            # Return classification response
+            # Return classification response with remedies
             return ClassificationResponse(
                 intent=intent,
                 result=classification_result["result"],
                 confidence=classification_result["confidence"],
+                remedies=remedies,
                 processing_time=processing_time
             )
             
